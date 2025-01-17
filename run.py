@@ -15,6 +15,8 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block
+import torch.nn.utils  # For gradient clipping
+from torch.distributed.fsdp.fully_sharded_data_parallel import MixedPrecision, ShardingStrategy
 
 from coconut import Coconut
 from dataset import (
@@ -177,17 +179,33 @@ def main():
         },
     )
 
-    if configs.bf16:
-        model.to(torch.bfloat16)
+        # if configs.bf16:
+        #     model.to(torch.bfloat16)
 
     # if only eval, use ddp (to avoid bugs in fsdp)
     if configs.only_eval:
         parallel_model = DDP(model, device_ids=[rank])
 
     else:
-        parallel_model = FSDP(
-            model, auto_wrap_policy=llama_auto_wrap_policy, device_id=rank
-        )
+        if configs.bf16:
+            mp_config = MixedPrecision(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+                buffer_dtype=torch.bfloat16,
+            )
+            parallel_model = FSDP(
+                model, 
+                auto_wrap_policy=llama_auto_wrap_policy, 
+                device_id=rank,
+                mixed_precision=mp_config,
+                sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,
+            )
+        else:
+            parallel_model = FSDP(
+                model, 
+                auto_wrap_policy=llama_auto_wrap_policy, 
+                device_id=rank
+            )
 
     del model
 
@@ -244,6 +262,11 @@ def main():
         scheduled_stage = (
             0 if (configs.cot or configs.no_cot) else epoch // configs.epochs_per_stage
         )
+
+        # probably should be
+        scheduled_stage = min(3, scheduled_stage)
+        print("Scheduled Stage:", scheduled_stage)
+            
         dataset_gen_val = get_question_latent_dataset(
             scheduled_stage,
             base_dataset_valid,
@@ -362,6 +385,7 @@ def main():
 
                 loss = outputs.loss / configs.gradient_accumulation_steps
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(parallel_model.parameters(), max_norm=1.0)
 
                 if (step + 1) % configs.gradient_accumulation_steps == 0 or step == len(
                     train_dataloader

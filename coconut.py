@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from collections import namedtuple
 from transformers.models.gpt2 import GPT2LMHeadModel
+import time
 
 Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 8
@@ -44,11 +45,17 @@ class Coconut(nn.Module):
             input_ids == self.latent_token_id
         ).nonzero()  # (num_latent_tokens_in_the_batch, 2)
 
-        latent_lists = [
-            [idx[1].item() for idx in latent_indices if idx[0] == i]
-            for i in range(input_ids.shape[0])
-        ]  # bs, num_latent_tokens_in_the_instance (difference across the batch)
+        # latent_lists = [
+        #     [idx[1].item() for idx in latent_indices if idx[0] == i]
+        #     for i in range(input_ids.shape[0])
+        # ]  # bs, num_latent_tokens_in_the_instance (difference across the batch)
 
+        latent_lists = [[] for _ in range(input_ids.size(0))]
+
+        # 2) Populate each list
+        for row_idx, col_idx in latent_indices:
+            latent_lists[row_idx.item()].append(col_idx.item())
+                
         max_n_latents = max([len(l) for l in latent_lists])
 
         next_compute_range = (0, input_ids.shape[1])
@@ -59,9 +66,11 @@ class Coconut(nn.Module):
             # before the earliest latent token position
 
         kv_cache = None
-
+        
         for pass_idx in range(max_n_latents):
-
+            
+            # import pdb; pdb.set_trace()
+            
             if kv_cache == None:
                 # first forward pass
                 outputs = self.base_causallm(
